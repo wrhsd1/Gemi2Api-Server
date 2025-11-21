@@ -8,13 +8,14 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
 from gemini_webapi.constants import Model
+from gemini_webapi.types.image import GeneratedImage, Image as GeminiImage
 from pydantic import BaseModel
 
 # Configure logging
@@ -91,6 +92,28 @@ def correct_markdown(md_text: str) -> str:
 	# fix wrapped markdownlink
 	pattern = r"`(\[[^\]]+\]\([^\)]+\))`"
 	return re.sub(pattern, r"\1", fixed_google_links)
+
+
+def build_image_contents(images: List[GeminiImage]) -> List[Dict[str, Any]]:
+	"""Serialize Gemini image objects into OpenAI-compatible image_url content blocks."""
+	image_contents: List[Dict[str, Any]] = []
+	for image in images or []:
+		url = getattr(image, "url", "")
+		if not url:
+			continue
+		image_payload: Dict[str, Any] = {"url": url}
+		title = getattr(image, "title", "")
+		if title:
+			image_payload["title"] = title
+		alt = getattr(image, "alt", "")
+		if alt:
+			image_payload["alt"] = alt
+		source = "generated" if isinstance(image, GeneratedImage) else "web"
+		image_payload["source"] = source
+		if source == "generated":
+			image_payload["requires_cookies"] = True
+		image_contents.append({"type": "image_url", "image_url": image_payload})
+	return image_contents
 
 
 # Pydantic models for API requests and responses
@@ -323,10 +346,8 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 		# 生成响应
 		logger.info("Sending request to Gemini...")
 		if temp_files:
-			# With files
 			response = await gemini_client.generate_content(conversation, files=temp_files, model=model)
 		else:
-			# Text only
 			response = await gemini_client.generate_content(conversation, model=model)
 
 		# 清理临时文件
@@ -338,7 +359,6 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 
 		# 提取文本响应
 		reply_text = ""
-		# 提取思考内容
 		if ENABLE_THINKING and hasattr(response, "thoughts"):
 			reply_text += f"<think>{response.thoughts}</think>"
 		if hasattr(response, "text"):
@@ -347,6 +367,14 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 			reply_text += str(response)
 		reply_text = reply_text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
 		reply_text = correct_markdown(reply_text)
+
+		image_contents = build_image_contents(getattr(response, "images", []))
+		structured_content: List[Dict[str, Any]] = []
+		text_block = reply_text.strip()
+		if text_block:
+			structured_content.append({"type": "text", "text": text_block})
+		if image_contents:
+			structured_content.extend(image_contents)
 
 		logger.info(f"Response: {reply_text}")
 
@@ -400,18 +428,25 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 			return StreamingResponse(generate_stream(), media_type="text/event-stream")
 		else:
 			# 非流式响应（原来的逻辑）
+			assistant_message: Dict[str, Any] = {"role": "assistant", "content": reply_text}
+			if structured_content:
+				assistant_message["content_blocks"] = structured_content
+			if image_contents:
+				assistant_message["images"] = [item["image_url"] for item in image_contents]
 			result = {
 				"id": completion_id,
 				"object": "chat.completion",
 				"created": created_time,
 				"model": request.model,
-				"choices": [{"index": 0, "message": {"role": "assistant", "content": reply_text}, "finish_reason": "stop"}],
+				"choices": [{"index": 0, "message": assistant_message, "finish_reason": "stop"}],
 				"usage": {
 					"prompt_tokens": len(conversation.split()),
 					"completion_tokens": len(reply_text.split()),
 					"total_tokens": len(conversation.split()) + len(reply_text.split()),
 				},
 			}
+			if image_contents:
+				result["images"] = [item["image_url"] for item in image_contents]
 
 			logger.info(f"Returning response: {result}")
 			return result
