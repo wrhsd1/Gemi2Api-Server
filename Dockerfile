@@ -6,8 +6,8 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN uv sync
 
-# Copy application code
-COPY main.py .
+# Copy full application after deps to avoid cache busting on every edit
+COPY . .
 
 # Expose the port the app runs on
 EXPOSE 8000
