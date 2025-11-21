@@ -1,9 +1,0 @@
-.git
-.github
-.env
-__pycache__
-*.pyc
-Dockerfile
-README.md
-render.yaml
-docker-compose.yml
