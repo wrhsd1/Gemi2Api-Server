@@ -31,4 +31,4 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: wrhsd/gemi2api-server:latest
+          tags: wrhsd/gemi2api-server:202511222315
